@@ -1,0 +1,58 @@
+1-Vendor Risk & Reliability Score System
+
+Why unique: Helps company decide trusted vendors.
+
+Idea:
+Calculate vendor score based on:
+
+Past participation
+
+Timely document upload
+
+Blacklist history
+
+Output:
+Vendor score (Low / Medium / High Risk)
+
+
+2-e-ProcureAnalytics
+
+Purpose:
+Analytics & reporting for procurement data.
+
+Reports:
+
+Most active vendors
+
+Average bid value
+
+Department-wise procurement
+
+Why good:
+Decision-making support system.
+
+3-Inventory Management for Procurement
+
+Description: Track available stock, incoming orders, and low-stock alerts.
+
+Key Features: Add items, update quantities, alerts for reordering.
+
+Tech: Spring Boot + MySQL + Bootstrap/React
+
+Why: Directly related to procurement operations.
+
+
+4-Supplier Document Expiry Alert
+
+Description: Alert admins when supplier documents (licenses, contracts) are about to expire.
+
+Features: Email/SMS reminders, list of upcoming expirations.
+
+Why: Practical, improves compliance, teaches scheduled tasks.
+
+
+5-“e-Asset Recovery Portal”
+
+“e-Asset Recovery Portal” is a system that helps banks manage customers who fail to repay loans. 
+The bank can seize their properties or assets and sell them through online or offline auctions to recover the money.
+The portal tracks loan defaults, manages foreclosed properties, handles the auction process, and records payments in a digital and organized way.
