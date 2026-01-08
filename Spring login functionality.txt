@@ -1,0 +1,109 @@
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.mail.SimpleMailMessage;
+import org.springframework.mail.javamail.JavaMailSender;
+import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
+import org.springframework.stereotype.Service;
+import java.util.Optional;
+import java.util.Random;
+
+@Service
+public class UserService {
+    @Autowired
+    private UserLoginRepository userRepo;
+
+    @Autowired
+    private JavaMailSender mailSender;
+
+    private final BCryptPasswordEncoder encoder = new BCryptPasswordEncoder();
+
+    // Generate random temp password (8 chars, alphanumeric)
+    private String generateTempPassword() {
+        String chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+        Random random = new Random();
+        StringBuilder sb = new StringBuilder(8);
+        for (int i = 0; i < 8; i++) {
+            sb.append(chars.charAt(random.nextInt(chars.length())));
+        }
+        return sb.toString();
+    }
+
+    // Send email with temp password
+    private void sendTempPasswordEmail(String email, String tempPass) {
+        SimpleMailMessage message = new SimpleMailMessage();
+        message.setTo(email);
+        message.setSubject("Your Temporary Login Password");
+        message.setText("Hi,\n\nYour temporary password for eProcurement login is: " + tempPass +
+                        "\n\nPlease login and change it immediately.\n\nBest, eProcurement Team");
+        mailSender.send(message);
+    }
+
+    // Handle login logic
+    public LoginResult authenticate(String email, String enteredPassword) {
+        Optional<UserLogin> userOpt = userRepo.findByEmail(email);
+        if (userOpt.isEmpty()) {
+            return LoginResult.failure("User not found");
+        }
+        UserLogin user = userOpt.get();
+
+        if (user.getAttempt() == 0) {
+            // First-time: Generate & send temp pass, save it hashed
+            String tempPass = generateTempPassword();
+            user.setPassword(encoder.encode(tempPass)); // Hash it!
+            user.setAttempt(1); // Mark as no longer first-time
+            userRepo.save(user);
+            sendTempPasswordEmail(email, tempPass);
+
+            // Don't login yet—redirect to enter temp pass
+            return LoginResult.tempPasswordSent(email);
+        } else {
+            // Normal login: Check hashed password
+            if (encoder.matches(enteredPassword, user.getPassword())) {
+                // Success! Reset attempts if needed
+                user.setAttempt(0);
+                userRepo.save(user);
+                return LoginResult.success(user);
+            } else {
+                // Failed: Increment attempt (add lock logic if attempt > 3, e.g., disable user)
+                user.setAttempt(user.getAttempt() + 1);
+                userRepo.save(user);
+                return LoginResult.failure("Invalid credentials. Attempts: " + user.getAttempt());
+            }
+        }
+    }
+
+    // Update password after temp validation (call this from change-password endpoint)
+    public LoginResult changePassword(String email, String tempPassword, String newPassword) {
+        Optional<UserLogin> userOpt = userRepo.findByEmail(email);
+        if (userOpt.isEmpty()) return LoginResult.failure("User not found");
+
+        UserLogin user = userOpt.get();
+        if (!encoder.matches(tempPassword, user.getPassword())) {
+            return LoginResult.failure("Invalid temporary password");
+        }
+
+        // Set new hashed password, ensure attempt=1 (no more temp flow)
+        user.setPassword(encoder.encode(newPassword));
+        user.setAttempt(1);
+        userRepo.save(user);
+        return LoginResult.success(user); // Now logged in
+    }
+}
+
+// Simple result wrapper (use a DTO or ResponseEntity in real)
+class LoginResult {
+    private boolean success;
+    private String message;
+    private UserLogin user; // Only on success
+
+    private LoginResult(boolean success, String message, UserLogin user) {
+        this.success = success;
+        this.message = message;
+        this.user = user;
+    }
+
+    public static LoginResult success(UserLogin user) { return new LoginResult(true, "Login successful", user); }
+    public static LoginResult failure(String msg) { return new LoginResult(false, msg, null); }
+    public static LoginResult tempPasswordSent(String email) { return new LoginResult(false, "Temp password sent to " + email, null); }
+
+    // getters...
+}
