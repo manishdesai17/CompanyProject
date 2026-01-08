@@ -106,4 +106,206 @@ class LoginResult {
     public static LoginResult tempPasswordSent(String email) { return new LoginResult(false, "Temp password sent to " + email, null); }
 
     // getters...
+
+}
+
+
+
+
+
+
+
+
+new code
+// UserService.java - Core business logic
+package com.eprocure.auth.service;
+
+import com.eprocure.auth.dto.LoginResult;
+import com.eprocure.auth.entity.UserLogin;
+import com.eprocure.auth.repository.UserLoginRepository;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.mail.SimpleMailMessage;
+import org.springframework.mail.javamail.JavaMailSender;
+import org.springframework.scheduling.annotation.Async;
+import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+
+import java.time.LocalDateTime;
+import java.util.Optional;
+import java.util.Random;
+
+@Slf4j
+@Service
+@RequiredArgsConstructor
+public class UserService {
+    private final UserLoginRepository userRepository;
+    private final JavaMailSender mailSender;
+    private final BCryptPasswordEncoder passwordEncoder = new BCryptPasswordEncoder(12); // Higher cost for prod
+
+    private static final int MAX_ATTEMPTS = 5;
+    private static final int TEMP_PASS_EXPIRY_HOURS = 24;
+    private static final String EMAIL_SUBJECT = "eProcurement: Your Temporary Login Password";
+    private static final String EMAIL_FROM = "no-reply@eprocuretech.com";
+
+    // Generate secure temp password (12 chars, alphanumeric + special)
+    private String generateTempPassword() {
+        String chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!@#$%^&*";
+        Random random = new Random();
+        StringBuilder sb = new StringBuilder(12);
+        for (int i = 0; i < 12; i++) {
+            sb.append(chars.charAt(random.nextInt(chars.length())));
+        }
+        return sb.toString();
+    }
+
+    // Async email sender with logging
+    @Async
+    @Transactional(noRollbackFor = Exception.class)
+    public void sendTempPasswordEmail(String email, String tempPass) {
+        try {
+            SimpleMailMessage message = new SimpleMailMessage();
+            message.setFrom(EMAIL_FROM);
+            message.setTo(email);
+            message.setSubject(EMAIL_SUBJECT);
+            message.setText(buildEmailBody(tempPass));
+            mailSender.send(message);
+            log.info("Temp password emailed to: {}", email);
+        } catch (Exception e) {
+            log.error("Failed to send email to {}: {}", email, e.getMessage());
+            // In real: Queue for retry via RabbitMQ
+        }
+    }
+
+    private String buildEmailBody(String tempPass) {
+        return """
+                Dear User,
+                
+                Your temporary password for eProcurement Technologies Ltd. is: %s
+                
+                Please log in immediately and change it to a secure one. This password expires in %d hours.
+                
+                If you didn't request this, contact support@eprocuretech.com.
+                
+                Best regards,
+                eProcurement Team
+                """.formatted(tempPass, TEMP_PASS_EXPIRY_HOURS);
+    }
+
+    @Transactional
+    public LoginResult authenticate(String email, String enteredPassword) {
+        Optional<UserLogin> userOpt = userRepository.findActiveByEmail(email);
+        if (userOpt.isEmpty()) {
+            log.warn("Login attempt for non-existent email: {}", email);
+            return LoginResult.builder().success(false).message("User not found").build();
+        }
+
+        UserLogin user = userOpt.get();
+
+        if (user.getAttempt() == 0) {
+            // First-time flow
+            return handleFirstTimeLogin(user, email);
+        } else {
+            // Standard auth
+            return handleStandardLogin(user, enteredPassword);
+        }
+    }
+
+    private LoginResult handleFirstTimeLogin(UserLogin user, String email) {
+        String tempPass = generateTempPassword();
+        String hashedTemp = passwordEncoder.encode(tempPass);
+
+        user.setPassword(hashedTemp);
+        user.setAttempt(1);
+        user.setTempPasswordExpiry(LocalDateTime.now().plusHours(TEMP_PASS_EXPIRY_HOURS));
+        userRepository.save(user);
+
+        sendTempPasswordEmail(email, tempPass);
+
+        return LoginResult.builder()
+                .success(false)
+                .message("Temporary password sent to " + email + ". Please check your inbox.")
+                .build();
+    }
+
+    private LoginResult handleStandardLogin(UserLogin user, String enteredPassword) {
+        if (user.getAccountLocked()) {
+            return LoginResult.builder().success(false).message("Account locked. Contact admin.").build();
+        }
+
+        if (passwordEncoder.matches(enteredPassword, user.getPassword())) {
+            // Success: Reset attempts
+            user.setAttempt(0);
+            user.setAccountLocked(false);
+            user.setLastFailedAttempt(null);
+            userRepository.save(user);
+            log.info("Successful login for: {}", user.getEmail());
+            return LoginResult.builder().success(true).user(user).message("Login successful").build();
+        } else {
+            // Fail: Increment and check lock
+            user.setAttempt(user.getAttempt() + 1);
+            user.setLastFailedAttempt(LocalDateTime.now());
+            if (user.getAttempt() >= MAX_ATTEMPTS) {
+                user.setAccountLocked(true);
+                log.warn("Account locked for {} after {} attempts", user.getEmail(), MAX_ATTEMPTS);
+            }
+            userRepository.save(user);
+            log.warn("Failed login attempt for: {}. Remaining: {}", user.getEmail(), MAX_ATTEMPTS - user.getAttempt());
+            return LoginResult.builder()
+                    .success(false)
+                    .message("Invalid credentials. Attempts left: " + (MAX_ATTEMPTS - user.getAttempt()))
+                    .build();
+        }
+    }
+
+    @Transactional
+    public LoginResult changePassword(String email, String currentPassword, String newPassword) {
+        Optional<UserLogin> userOpt = userRepository.findByEmail(email);
+        if (userOpt.isEmpty()) {
+            return LoginResult.builder().success(false).message("User not found").build();
+        }
+
+        UserLogin user = userOpt.get();
+        if (!passwordEncoder.matches(currentPassword, user.getPassword())) {
+            // Increment attempt for invalid current pass
+            user.setAttempt(user.getAttempt() + 1);
+            if (user.getAttempt() >= MAX_ATTEMPTS) user.setAccountLocked(true);
+            userRepository.save(user);
+            return LoginResult.builder().success(false).message("Invalid current password").build();
+        }
+
+        // Validate new password strength (custom logic here, e.g., length >12, no common words)
+        if (!isStrongPassword(newPassword)) {
+            return LoginResult.builder().success(false).message("New password too weak. Use 12+ chars with mix.").build();
+        }
+
+        // Check for reuse (compare last 5, but simplified here)
+        user.setPassword(passwordEncoder.encode(newPassword));
+        user.setAttempt(1); // Post-change, treat as established
+        user.setTempPasswordExpiry(null);
+        user.setAccountLocked(false);
+        userRepository.save(user);
+
+        log.info("Password changed for: {}", email);
+        return LoginResult.builder().success(true).user(user).message("Password changed successfully").build();
+    }
+
+    private boolean isStrongPassword(String password) {
+        return password.length() >= 12 &&
+               password.matches("^(?=.*[a-z])(?=.*[A-Z])(?=.*\\d)(?=.*[@$!%*?&])[A-Za-z\\d@$!%*?&].{8,}$");
+    }
+
+    // Admin: Unlock account
+    @Transactional
+    public void unlockAccount(Long userId) {
+        Optional<UserLogin> userOpt = userRepository.findById(userId);
+        userOpt.ifPresent(user -> {
+            user.setAccountLocked(false);
+            user.setAttempt(0);
+            user.setLastFailedAttempt(null);
+            userRepository.save(user);
+            log.info("Admin unlocked account: {}", user.getEmail());
+        });
+    }
 }
